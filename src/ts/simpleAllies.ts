@@ -1,42 +1,71 @@
-export const allies = [
-    'Player1',
-    'Player2',
-    'Player3',
-]
-// This is the conventional segment used for team communication
-export const allySegmentID = 90
-// This isn't in the docs for some reason, so we need to add it
-export const maxSegmentsOpen = 10
+import { randomHex } from "utils"
 
-export type AllyRequestTypes =     'resource' |
-'defense' |
-'attack' |
-'player' |
-'work' |
-'econ' |
-'room'
+/**
+ * The segment ID used for communication
+ */
+export const SIMPLE_ALLIES_SEGMENT_ID = 90
 
-export interface ResourceRequest {
+/**
+ * Max number of segments openable at once
+ * This isn't in the docs for some reason, so we need to add it
+ */
+const MAX_OPEN_SEGMENTS = 10
+
+const SIMPLE_ALLIES_DEFAULT_PRIORITY = 0
+
+/**
+ * The rate at which to refresh allied segments
+ */
+const SIMPLE_ALLIES_MIN_REFRESH_RATE = 5
+
+/** Type of requests supported */
+export type AllyRequestTypes =
+    | 'resource'
+    | 'defense'
+    | 'attack'
+    | 'player'
+    | 'work'
+    | 'econ'
+    | 'room'
+
+/** A request identifier */
+type RequestID = string & Tag.OpaqueTag<Request>
+
+/**
+ * Root type for all requests
+ */
+interface Request {
+    /** The request's unique identifier */
+    id: RequestID
+    /** The request's priority, from 0 (low) to 1 (high) */
     priority: number
-    roomName: string
+}
+
+export interface ResourceRequest extends Request {
+    /**
+     * The resource type requested
+     */
     resourceType: ResourceConstant
+
     /**
      * How much they want of the resource. If the responder sends only a portion of what you ask for, that's fine
      */
     amount: number
+
+    /**
+     * The room to sent the resource at
+     */
+    roomName?: string
+
     /**
      * If the bot has no terminal, allies should instead haul the resources to us
      */
     terminal?: boolean
 }
 
-export interface DefenseRequest {
-    priority: number
-}
+export interface DefenseRequest extends Request {}
 
-export interface AttackRequest {
-    priority: number
-}
+export interface AttackRequest extends Request {}
 
 export interface PlayerRequest {
     /**
@@ -51,12 +80,12 @@ export interface PlayerRequest {
 
 export type WorkRequestType = 'build' | 'upgrade' | 'repair'
 
-export interface WorkRequest {
-    priority: number
+export interface WorkRequest extends Request {
+    roomName: string
     workType: WorkRequestType
 }
 
-export interface EconRequest {
+export interface SelfInfo {
     /**
      * total credits the bot has. Should be 0 if there is no market on the server
      */
@@ -76,7 +105,7 @@ export interface EconRequest {
     mineralNodes?: { [key in MineralConstant]: number }
 }
 
-export interface RoomRequest {
+export interface IntelRequest {
     /**
      * The player who owns this room. If there is no owner, the room probably isn't worth making a request about
      */
@@ -96,143 +125,364 @@ export interface RoomRequest {
 }
 
 export interface AllyRequests {
-    resource: {[ID: string]: ResourceRequest}
-    defense: {[roomName: string]: DefenseRequest}
-    attack: {[roomName: string]: AttackRequest}
-    player: {[playerName: string]: PlayerRequest}
-    work: {[roomName: string]: WorkRequest}
-    econ: EconRequest
-    room: {[roomName: string]: RoomRequest}
+    resource?: { [id: RequestID]: ResourceRequest }
+    defense?: { [roomName: string]: DefenseRequest }
+    attack?: { [roomName: string]: AttackRequest }
+    player?: string[]
+    work?: { [roomName: string]: WorkRequest }
+    intel?: string[]
 }
+
 /**
- * Having data we pass into the segment being an object allows us to send additional information outside of requests
+ * Data definition for the shared segment used
  */
 export interface SegmentData {
+    /** The tick the segment was last updated at */
+    updatedAt: number
     /**
      * Requests of the new system
      */
     requests: AllyRequests
+    /**
+     * Economic data on ourself
+     */
+    info?: SelfInfo
 }
 
-class SimpleAllies {
-    /**
-     * The intra-tick index for tracking IDs assigned to requests
-     */
-    private requestID: number
-    myRequests: Partial<AllyRequests> = {}
-    allySegmentData: SegmentData
-    currentAlly: string
+export class SimpleAllies {
+    _allies: string[]
+    allySegments: { [playerName: string]: SegmentData }
+    selfInfo: SelfInfo | undefined
+    requests: {
+        resource: { [id: RequestID]: ResourceRequest }
+        defense: { [roomName: string]: DefenseRequest }
+        attack: { [roomName: string]: AttackRequest }
+        player: Set<string>
+        work: { [roomName: string]: WorkRequest }
+        intel: Set<string>
+    }
 
-    /**
-     * To call before any requests are made or responded to. Configures some required values and gets ally requests
-     */
-    initRun() {
-        // Reset the data of myRequests
-        this.myRequests = {
+    lastRequestTime: number
+    refreshRate: number
+    _debug: boolean
+    allyIdx: number
+
+    constructor(options?: { refreshRate?: number; debug?: boolean }) {
+        this._allies = []
+        this.allySegments = {}
+        this.requests = {
             resource: {},
             defense: {},
             attack: {},
-            player: {},
+            player: new Set(),
             work: {},
-            room: {},
+            intel: new Set(),
         }
-        this.requestID = 0
+        this.allyIdx = 0
+        this.refreshRate = options?.refreshRate ?? SIMPLE_ALLIES_MIN_REFRESH_RATE
+        this._debug = options?.debug ?? false
+        this.lastRequestTime = 0
+    }
 
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private log(...args: any[]) {
+        console.log('SimpleAllies', ...args)
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    private debug(...args: any[]) {
+        if (!this._debug) return
+
+        this.log(...args)
+    }
+
+    private makeRequestID() {
+        return randomHex(20) as RequestID
+    }
+
+    private checkPriority(priority: number | undefined) {
+        if (typeof priority !== 'number') return SIMPLE_ALLIES_DEFAULT_PRIORITY
+        return Math.max(0, Math.min(1, priority))
+    }
+
+    get allies() {
+        return this._allies
+    }
+
+    set allies(value: string[]) {
+        this._allies = [...value]
+    }
+
+    /**
+     * Main initialization method
+     *
+     * Must be called before any requests are made or responded to.
+     *
+     * Is responsible for fetching allied segments in the background
+     */
+    init() {
+        // Reset the data of myRequests
         this.readAllySegment()
     }
 
+    // Segment helpers
+
     /**
-     * Try to get segment data from our current ally. If successful, assign to the instane
+     * Private helper to check for segment availability
+     *
+     * Subclasses can override that to perform their own segment processing
      */
-    readAllySegment() {
-        if (!allies.length) {
-            throw Error("Failed to find an ally for simpleAllies, you probably have none :(")
+    private canOpenSegment() {
+        return Object.keys(RawMemory.segments).length < MAX_OPEN_SEGMENTS
+    }
+
+    /**
+     * Private helper to write a segment
+     *
+     * Subclasses can override that to perform their own segment processing
+     */
+    private writeSegment(id: number, segment: SegmentData) {
+        RawMemory.segments[id] = JSON.stringify(segment)
+    }
+
+    /**
+     * Private helper to mark a segment as public
+     *
+     * Subclasses can override that to perform their own segment processing
+     */
+    private markPublic(id: number) {
+        RawMemory.setPublicSegments([id])
+    }
+
+    /**
+     * Private helper to activate a foreign segment
+     *
+     * Subclasses can override that to perform their own segment processing
+     */
+    private setForeignSegment(playerName: string, id: number) {
+        RawMemory.setActiveForeignSegment(playerName, id)
+    }
+
+    /**
+     * Private helper to read and parse a foreign segment
+     *
+     * Subclasses can override that to perform their own segment processing
+     */
+    private readForeignSegment(playerName: string, id: number) {
+        if (!RawMemory.foreignSegment) return
+        if (
+            RawMemory.foreignSegment.username !== playerName ||
+            RawMemory.foreignSegment.id !== id
+        ) {
+            this.debug(`not the segment we were expecting, ignoring`)
+            return undefined
         }
 
-        this.currentAlly = allies[Game.time % allies.length]
-
-        // Make a request to read the data of the next ally in the list, for next tick
-        const nextAllyName = allies[(Game.time + 1) % allies.length]
-        RawMemory.setActiveForeignSegment(nextAllyName, allySegmentID)
-
-        // Maybe the code didn't run last tick, so we didn't set a new read segment
-        if (!RawMemory.foreignSegment) return
-        if (RawMemory.foreignSegment.username !== this.currentAlly) return
-
-        // Protect from errors as we try to get ally segment data
+        // Safely grab the segment and parse it in
+        let segment
         try {
-            this.allySegmentData = JSON.parse(RawMemory.foreignSegment.data)
+            segment = JSON.parse(RawMemory.foreignSegment.data)
         } catch (err) {
-            console.log('Error in getting requests for simpleAllies', this.currentAlly)
+            console.log('Error in getting requests for simpleAllies', playerName)
+        }
+        return segment
+    }
+
+    /**
+     * Refresh our allies' shared segments in a round-robin
+     */
+    private readAllySegment() {
+        if (!this._allies.length) {
+            this.log(`no allies, skipping`)
+            return
+        }
+
+        const clock = ((Game.time - 1) % this.refreshRate) - this.refreshRate + 1
+        switch (clock) {
+            case -1: {
+                // Make a request to read the data of the next ally in the list, for next tick
+                this.allyIdx = (this.allyIdx + 1) % this._allies.length
+                const ally = this._allies[this.allyIdx]
+                this.debug(`loading segment for ${ally}`)
+                this.setForeignSegment(ally, SIMPLE_ALLIES_SEGMENT_ID)
+                break
+            }
+            case 0: {
+                this.debug(`checking loaded segment…`)
+                const ally = this._allies[this.allyIdx]
+                const segment = this.readForeignSegment(ally, SIMPLE_ALLIES_SEGMENT_ID)
+                if (segment) {
+                    this.debug(`successfully loaded segment for ${ally}`)
+                    this.allySegments[ally] = segment
+                } else {
+                    this.debug(`unable to load segment for ${ally}, resetting`)
+                    delete this.allySegments[ally]
+                }
+
+                break
+            }
+            default:
+                break
         }
     }
 
     /**
-     * To call after requests have been made, to assign requests to the next ally
+     * Update our segment with requests made
+     *
+     * Must be called after all requests were made
      */
-    endRun() {
+    run() {
+        // Check if we have any new requests to send
+        if (this.lastRequestTime !== Game.time) return
 
         // Make sure we don't have too many segments open
-        if (Object.keys(RawMemory.segments).length >= maxSegmentsOpen) {
-            throw Error('Too many segments open: simpleAllies')
+        if (this.canOpenSegment()) {
+            this.log(`Too many segments open: can't update!`)
+            return
         }
 
-        const newSegmentData: SegmentData = {
-            requests: this.myRequests as AllyRequests
+        const segment: SegmentData = {
+            updatedAt: Game.time,
+            requests: {
+                resource: this.requests.resource,
+                defense: this.requests.defense,
+                attack: this.requests.attack,
+                player: [...this.requests.player.keys()],
+                work: this.requests.work,
+                intel: [...this.requests.intel.keys()],
+            },
         }
+        if (this.selfInfo) segment.info = this.selfInfo
 
-        RawMemory.segments[allySegmentID] = JSON.stringify(newSegmentData)
-        RawMemory.setPublicSegments([allySegmentID])
+        this.writeSegment(SIMPLE_ALLIES_SEGMENT_ID, segment)
+        this.markPublic(SIMPLE_ALLIES_SEGMENT_ID)
     }
 
     // Request methods
 
-    requestResource(args: ResourceRequest) {
-
-        const ID = this.newRequestID()
-        this.myRequests.resource[ID] = args
+    /**
+     * Set our own info to provide to allies
+     */
+    setSelf(info: SelfInfo) {
+        this.selfInfo = info
+        this.lastRequestTime = Game.time
     }
 
-    requestDefense(
-        roomName: string,
-        args: DefenseRequest
+    /**
+     * Request resources
+     */
+    requestResource(
+        resourceType: ResourceConstant,
+        amount: number,
+        opts: { priority: number; roomName?: string; hasTerminal?: boolean }
     ) {
+        const id = this.makeRequestID()
+        const request: ResourceRequest = {
+            id,
+            resourceType,
+            amount,
+            priority: this.checkPriority(opts.priority),
+            roomName: opts.roomName,
+        }
+        if (opts.hasTerminal) request.terminal = opts.hasTerminal
 
-        this.myRequests.defense[roomName] = args
+        this.requests.resource ??= {}
+        this.requests.resource[id] = request
+        this.lastRequestTime = Game.time
     }
 
-    requestAttack(
-        roomName: string,
-        args: AttackRequest
-    ) {
-
-        this.myRequests.attack[roomName] = args
+    /**
+     * Request a defense force for a given room
+     */
+    requestDefense(roomName: string, opts: { priority?: number }) {
+        if (this.requests.defense[roomName]) {
+            this.log(`defense request for room ${roomName} already exists, ignoring`)
+            return
+        }
+        const id = this.makeRequestID()
+        const request: DefenseRequest = {
+            id,
+            priority: this.checkPriority(opts.priority),
+        }
+        this.requests.defense ??= {}
+        this.requests.defense[roomName] = request
+        this.lastRequestTime = Game.time
     }
 
-    requestPlayer(playerName: string, args: PlayerRequest) {
-
-        this.myRequests.player[playerName] = args
+    /**
+     * Request an attack force to be sent to the given room
+     */
+    requestAttack(roomName: string, opts: { priority?: number }) {
+        if (this.requests.attack[roomName]) {
+            this.log(`attack request for room ${roomName} already exists, ignoring`)
+            return
+        }
+        const id = this.makeRequestID()
+        const request: AttackRequest = {
+            id,
+            priority: this.checkPriority(opts.priority),
+        }
+        this.requests.attack ??= {}
+        this.requests.attack[roomName] = request
+        this.lastRequestTime = Game.time
     }
 
-    requestWork(roomName: string, args: WorkRequest) {
-
-        this.myRequests.work[roomName] = args
+    /**
+     * Request intel on a player
+     *
+     * @param playerName
+     */
+    requestPlayer(playerName: string) {
+        this.requests.player.add(playerName)
+        this.lastRequestTime = Game.time
     }
 
-    requestEcon(args: EconRequest) {
-
-        this.myRequests.econ = args
+    /**
+     * Request some help in working a room
+     *
+     * @param roomName
+     * @param workType
+     * @param opts
+     * @returns
+     */
+    requestWork(roomName: string, workType: WorkRequestType, opts: { priority?: number }) {
+        if (this.requests.work[roomName]) {
+            this.log(`work request for room ${roomName} already exists, ignoring`)
+            return
+        }
+        const id = this.makeRequestID()
+        const request: WorkRequest = {
+            id,
+            roomName,
+            workType,
+            priority: this.checkPriority(opts.priority),
+        }
+        this.requests.work[roomName] = request
+        this.lastRequestTime = Game.time
     }
 
-    requestRoom(roomName: string, args: RoomRequest) {
-
-        this.myRequests.room[roomName] = args
+    /**
+     * Request intel on a given room
+     *
+     * @param roomName
+     */
+    requestIntel(roomName: string) {
+        this.requests.intel.add(roomName)
+        this.lastRequestTime = Game.time
     }
 
-    private newRequestID() {
+    // Request processing
 
-        return (this.requestID += 1).toString()
+    processResourceRequests() {
+        for (const [_ally, segment] of Object.entries(this.allySegments)) {
+            if (!segment.requests.resource) continue
+
+            const requests = Object.entries(segment.requests.resource ?? {})
+            requests.sort(([_aID, aReq], [_bId, bReq]) => aReq.priority - bReq.priority)
+            return requests;
+        }
+        return []
     }
 }
 
-export const simpleAllies = new SimpleAllies()
+// export const simpleAllies = new SimpleAllies()

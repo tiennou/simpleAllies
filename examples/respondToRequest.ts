@@ -1,23 +1,23 @@
 // IMPORTANT: This code is just meant to show you how use the segment data. It probably execute
 
-import { ResourceRequest, simpleAllies } from "../src/ts/simpleAllies";
+import { ResourceRequest, SimpleAllies } from '../src/ts/simpleAllies'
 
 // Example of fulfilling an ally resource request
 
-export function loop() {
+const simpleAllies = new SimpleAllies()
+simpleAllies.allies = ['Player1', 'Player2', 'Player3']
 
-    simpleAllies.initRun()
+export function loop() {
+    simpleAllies.init()
 
     respondToResourceRequests()
 
-    simpleAllies.endRun()
+    simpleAllies.run()
 }
 
 function respondToResourceRequests() {
-
-    const resourceRequests = simpleAllies.allySegmentData.requests.resource
+    const resourceRequests = simpleAllies.processResourceRequests()
     for (const ID in resourceRequests) {
-
         const request = resourceRequests[ID]
 
         // Respond to the request
@@ -29,7 +29,6 @@ function respondToResourceRequests() {
     }
 }
 
-function sendResource(request: ResourceRequest) {
-
+function sendResource(_request: ResourceRequest) {
     // Just an example. You'd probably want to call terminal.send() to properly respond to the request
 }
