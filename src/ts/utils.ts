@@ -10,3 +10,17 @@ export function randomHex(length: number): string {
     }
     return result
 }
+
+export function findSortedIndex<T>(ary: T[], cmp: (obj: T) => boolean) {
+    let i
+    for (i = i = ary.length - 1; i >= 0 && cmp(ary[i]); i--) {
+        /** loop */
+    }
+
+    return i + 1
+}
+
+export function insertSorted<T>(ary: T[], value: T, cmp: (a: T, b: T) => boolean) {
+    const insertIdx = findSortedIndex(ary, obj => cmp(obj, value))
+    ary.splice(insertIdx, 0, value)
+}

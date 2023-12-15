@@ -1,4 +1,4 @@
-import { randomHex } from "utils"
+import { insertSorted, randomHex } from 'utils'
 
 /**
  * The segment ID used for communication
@@ -18,16 +18,6 @@ const SIMPLE_ALLIES_DEFAULT_PRIORITY = 0
  */
 const SIMPLE_ALLIES_MIN_REFRESH_RATE = 5
 
-/** Type of requests supported */
-export type AllyRequestTypes =
-    | 'resource'
-    | 'defense'
-    | 'attack'
-    | 'player'
-    | 'work'
-    | 'econ'
-    | 'room'
-
 /** A request identifier */
 type RequestID = string & Tag.OpaqueTag<Request>
 
@@ -39,6 +29,22 @@ interface Request {
     id: RequestID
     /** The request's priority, from 0 (low) to 1 (high) */
     priority: number
+}
+
+interface Response {
+    status: RequestStatus
+    requestId: RequestID
+}
+
+interface RoomRequest extends Request {
+    roomName: string
+}
+
+type Eta = number | [min: number, max: number]
+
+interface RoomResponse extends Response {
+    creepCount: number
+    eta?: Eta
 }
 
 export interface ResourceRequest extends Request {
@@ -63,11 +69,24 @@ export interface ResourceRequest extends Request {
     terminal?: boolean
 }
 
-export interface DefenseRequest extends Request {}
+export interface ResourceResponse extends Response {}
 
-export interface AttackRequest extends Request {}
+export interface DefenseRequest extends RoomRequest {}
+export interface DefenseResponse extends RoomResponse {}
 
-export interface PlayerRequest {
+export interface AttackRequest extends RoomRequest {}
+
+export interface AttackResponse extends RoomResponse {}
+
+export type WorkRequestType = 'build' | 'upgrade' | 'repair'
+
+export interface WorkRequest extends RoomRequest {
+    workType: WorkRequestType
+}
+
+export interface WorkResponse extends RoomResponse {}
+
+export interface PlayerInfo {
     /**
      * The amount you think your team should hate the player. Hate should probably affect combat aggression and targetting
      */
@@ -76,13 +95,6 @@ export interface PlayerRequest {
      * The last time this player has attacked you
      */
     lastAttackedBy?: number
-}
-
-export type WorkRequestType = 'build' | 'upgrade' | 'repair'
-
-export interface WorkRequest extends Request {
-    roomName: string
-    workType: WorkRequestType
 }
 
 export interface SelfInfo {
@@ -105,7 +117,7 @@ export interface SelfInfo {
     mineralNodes?: { [key in MineralConstant]: number }
 }
 
-export interface IntelRequest {
+export interface RoomIntel {
     /**
      * The player who owns this room. If there is no owner, the room probably isn't worth making a request about
      */
@@ -125,63 +137,106 @@ export interface IntelRequest {
 }
 
 export interface AllyRequests {
-    resource?: { [id: RequestID]: ResourceRequest }
-    defense?: { [roomName: string]: DefenseRequest }
-    attack?: { [roomName: string]: AttackRequest }
+    resource?: ResourceRequest[]
+    defense?: DefenseRequest[]
+    attack?: AttackRequest[]
+    work?: WorkRequest[]
     player?: string[]
-    work?: { [roomName: string]: WorkRequest }
     intel?: string[]
 }
+
+export interface AllyResponses {
+    intel?: { [roomName: string]: RoomIntel }
+    player?: { [playerName: string]: PlayerInfo }
+}
+
+/** Type of requests supported */
+export type RequestType = keyof AllyRequests
 
 /**
  * Data definition for the shared segment used
  */
-export interface SegmentData {
+export interface AllySegment {
     /** The tick the segment was last updated at */
     updatedAt: number
-    /**
-     * Requests of the new system
-     */
-    requests: AllyRequests
     /**
      * Economic data on ourself
      */
     info?: SelfInfo
+    /**
+     * Requests of the new system
+     */
+    requests?: AllyRequests
+    responses?: AllyResponses
 }
 
+interface AllRequestTypes {
+    resource: ResourceRequest
+    defense: DefenseRequest
+    attack: AttackRequest
+    work: WorkRequest
+    player: string
+    intel: string
+}
+
+export const RequestStatus = {
+    FULFILLED: 'f',
+    DISMISSED: 'd',
+} as const
+
+export type RequestStatus = (typeof RequestStatus)[keyof typeof RequestStatus]
+
 export class SimpleAllies {
-    _allies: string[]
-    allySegments: { [playerName: string]: SegmentData }
+    _allies: Set<string>
+    allySegments: { [playerName: string]: AllySegment }
     selfInfo: SelfInfo | undefined
     requests: {
-        resource: { [id: RequestID]: ResourceRequest }
-        defense: { [roomName: string]: DefenseRequest }
-        attack: { [roomName: string]: AttackRequest }
+        resource: ResourceRequest[]
+        defense: DefenseRequest[]
+        attack: AttackRequest[]
+        work: WorkRequest[]
         player: Set<string>
-        work: { [roomName: string]: WorkRequest }
         intel: Set<string>
     }
+    responses: {
+        resource: { [id: RequestID]: ResourceResponse }
+        attack: { [id: RequestID]: AttackResponse }
+        defense: { [id: RequestID]: DefenseResponse }
+        work: { [id: RequestID]: WorkResponse }
+        intel: { [roomName: string]: RoomIntel }
+        player: { [playerName: string]: PlayerInfo }
+    }
 
-    lastRequestTime: number
+    requestStatus: { [id: RequestID]: RequestStatus } = {}
+
+    lastUpdateTime: number
     refreshRate: number
     _debug: boolean
     allyIdx: number
 
     constructor(options?: { refreshRate?: number; debug?: boolean }) {
-        this._allies = []
+        this._allies = new Set()
         this.allySegments = {}
         this.requests = {
+            resource: [],
+            defense: [],
+            attack: [],
+            work: [],
+            player: new Set(),
+            intel: new Set(),
+        }
+        this.responses = {
             resource: {},
             defense: {},
             attack: {},
-            player: new Set(),
             work: {},
-            intel: new Set(),
+            player: {},
+            intel: {},
         }
         this.allyIdx = 0
         this.refreshRate = options?.refreshRate ?? SIMPLE_ALLIES_MIN_REFRESH_RATE
         this._debug = options?.debug ?? false
-        this.lastRequestTime = 0
+        this.lastUpdateTime = 0
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -205,12 +260,19 @@ export class SimpleAllies {
         return Math.max(0, Math.min(1, priority))
     }
 
-    get allies() {
-        return this._allies
+    addAlly(...allies: string[]) {
+        for (const ally of allies) {
+            this._allies.add(ally)
+        }
+    }
+    removeAlly(...allies: string[]) {
+        for (const ally of allies) {
+            this._allies.delete(ally)
+        }
     }
 
-    set allies(value: string[]) {
-        this._allies = [...value]
+    get allies() {
+        return [...this._allies.keys()]
     }
 
     /**
@@ -241,7 +303,7 @@ export class SimpleAllies {
      *
      * Subclasses can override that to perform their own segment processing
      */
-    private writeSegment(id: number, segment: SegmentData) {
+    private writeSegment(id: number, segment: AllySegment) {
         RawMemory.segments[id] = JSON.stringify(segment)
     }
 
@@ -292,7 +354,7 @@ export class SimpleAllies {
      * Refresh our allies' shared segments in a round-robin
      */
     private readAllySegment() {
-        if (!this._allies.length) {
+        if (!this._allies.size) {
             this.log(`no allies, skipping`)
             return
         }
@@ -301,15 +363,15 @@ export class SimpleAllies {
         switch (clock) {
             case -1: {
                 // Make a request to read the data of the next ally in the list, for next tick
-                this.allyIdx = (this.allyIdx + 1) % this._allies.length
-                const ally = this._allies[this.allyIdx]
+                this.allyIdx = (this.allyIdx + 1) % this._allies.size
+                const ally = this.allies[this.allyIdx]
                 this.debug(`loading segment for ${ally}`)
                 this.setForeignSegment(ally, SIMPLE_ALLIES_SEGMENT_ID)
                 break
             }
             case 0: {
                 this.debug(`checking loaded segment…`)
-                const ally = this._allies[this.allyIdx]
+                const ally = this.allies[this.allyIdx]
                 const segment = this.readForeignSegment(ally, SIMPLE_ALLIES_SEGMENT_ID)
                 if (segment) {
                     this.debug(`successfully loaded segment for ${ally}`)
@@ -333,7 +395,7 @@ export class SimpleAllies {
      */
     run() {
         // Check if we have any new requests to send
-        if (this.lastRequestTime !== Game.time) return
+        if (this.lastUpdateTime !== Game.time) return
 
         // Make sure we don't have too many segments open
         if (this.canOpenSegment()) {
@@ -341,7 +403,7 @@ export class SimpleAllies {
             return
         }
 
-        const segment: SegmentData = {
+        const segment: AllySegment = {
             updatedAt: Game.time,
             requests: {
                 resource: this.requests.resource,
@@ -353,6 +415,9 @@ export class SimpleAllies {
             },
         }
         if (this.selfInfo) segment.info = this.selfInfo
+        if (this.responses) {
+            segment.responses = this.responses
+        }
 
         this.writeSegment(SIMPLE_ALLIES_SEGMENT_ID, segment)
         this.markPublic(SIMPLE_ALLIES_SEGMENT_ID)
@@ -365,7 +430,7 @@ export class SimpleAllies {
      */
     setSelf(info: SelfInfo) {
         this.selfInfo = info
-        this.lastRequestTime = Game.time
+        this.lastUpdateTime = Game.time
     }
 
     /**
@@ -386,55 +451,47 @@ export class SimpleAllies {
         }
         if (opts.hasTerminal) request.terminal = opts.hasTerminal
 
-        this.requests.resource ??= {}
-        this.requests.resource[id] = request
-        this.lastRequestTime = Game.time
+        insertSorted(this.requests.resource, request, (a, b) => a.priority < b.priority)
+        this.lastUpdateTime = Game.time
+        return id
     }
 
     /**
      * Request a defense force for a given room
      */
     requestDefense(roomName: string, opts: { priority?: number }) {
-        if (this.requests.defense[roomName]) {
+        if (this.requests.defense.some(req => req.roomName === roomName)) {
             this.log(`defense request for room ${roomName} already exists, ignoring`)
             return
         }
         const id = this.makeRequestID()
         const request: DefenseRequest = {
             id,
+            roomName,
             priority: this.checkPriority(opts.priority),
         }
-        this.requests.defense ??= {}
-        this.requests.defense[roomName] = request
-        this.lastRequestTime = Game.time
+        insertSorted(this.requests.defense, request, (a, b) => a.priority < b.priority)
+        this.lastUpdateTime = Game.time
+        return id
     }
 
     /**
      * Request an attack force to be sent to the given room
      */
     requestAttack(roomName: string, opts: { priority?: number }) {
-        if (this.requests.attack[roomName]) {
+        if (this.requests.attack.some(req => req.roomName === roomName)) {
             this.log(`attack request for room ${roomName} already exists, ignoring`)
             return
         }
         const id = this.makeRequestID()
         const request: AttackRequest = {
             id,
+            roomName,
             priority: this.checkPriority(opts.priority),
         }
-        this.requests.attack ??= {}
-        this.requests.attack[roomName] = request
-        this.lastRequestTime = Game.time
-    }
-
-    /**
-     * Request intel on a player
-     *
-     * @param playerName
-     */
-    requestPlayer(playerName: string) {
-        this.requests.player.add(playerName)
-        this.lastRequestTime = Game.time
+        insertSorted(this.requests.attack, request, (a, b) => a.priority < b.priority)
+        this.lastUpdateTime = Game.time
+        return id
     }
 
     /**
@@ -446,7 +503,7 @@ export class SimpleAllies {
      * @returns
      */
     requestWork(roomName: string, workType: WorkRequestType, opts: { priority?: number }) {
-        if (this.requests.work[roomName]) {
+        if (this.requests.work.some(req => req.roomName === roomName)) {
             this.log(`work request for room ${roomName} already exists, ignoring`)
             return
         }
@@ -457,8 +514,19 @@ export class SimpleAllies {
             workType,
             priority: this.checkPriority(opts.priority),
         }
-        this.requests.work[roomName] = request
-        this.lastRequestTime = Game.time
+        insertSorted(this.requests.work, request, (a, b) => a.priority < b.priority)
+        this.lastUpdateTime = Game.time
+        return id
+    }
+
+    /**
+     * Request intel on a player
+     *
+     * @param playerName
+     */
+    requestPlayer(playerName: string) {
+        this.requests.player.add(playerName)
+        this.lastUpdateTime = Game.time
     }
 
     /**
@@ -468,21 +536,92 @@ export class SimpleAllies {
      */
     requestIntel(roomName: string) {
         this.requests.intel.add(roomName)
-        this.lastRequestTime = Game.time
+        this.lastUpdateTime = Game.time
+    }
+
+    // Response handling
+
+    replyResource(request: ResourceRequest, amount: number) {
+        const response: ResourceResponse = {
+            requestId: request.id,
+            status: amount > 0 ? RequestStatus.FULFILLED : RequestStatus.DISMISSED,
+        }
+        this.responses.resource[request.id] = response
+        this.lastUpdateTime = Game.time
+    }
+
+    replyAttack(request: AttackRequest, data: { creepCount: number; eta?: Eta }) {
+        const response: AttackResponse = {
+            requestId: request.id,
+            status: data.creepCount > 0 ? RequestStatus.FULFILLED : RequestStatus.DISMISSED,
+            creepCount: data.creepCount,
+        }
+        if (data.creepCount && data.eta) response.eta = data.eta
+
+        this.responses.attack[request.id] = response
+        this.lastUpdateTime = Game.time
+    }
+
+    replyDefense(request: DefenseRequest, data: { creepCount: number; eta?: Eta }) {
+        const response: DefenseResponse = {
+            requestId: request.id,
+            status: data.creepCount > 0 ? RequestStatus.FULFILLED : RequestStatus.DISMISSED,
+            creepCount: data.creepCount,
+        }
+        if (data.creepCount && data.eta) response.eta = data.eta
+
+        this.responses.defense[request.id] = response
+        this.lastUpdateTime = Game.time
+    }
+
+    replyWork(request: WorkRequest, data: { creepCount: number; eta?: Eta }) {
+        const response: WorkResponse = {
+            requestId: request.id,
+            status: data.creepCount > 0 ? RequestStatus.FULFILLED : RequestStatus.DISMISSED,
+            creepCount: data.creepCount,
+        }
+        if (data.creepCount && data.eta) response.eta = data.eta
+
+        this.responses.work[request.id] = response
+        this.lastUpdateTime = Game.time
+    }
+
+    replyIntel(roomName: string, intel: RoomIntel) {
+        this.responses.intel[roomName] = intel
+        this.lastUpdateTime = Game.time
+    }
+
+    replyPlayer(playerName: string, info: PlayerInfo) {
+        this.responses.player[playerName] = info
+        this.lastUpdateTime = Game.time
     }
 
     // Request processing
 
-    processResourceRequests() {
-        for (const [_ally, segment] of Object.entries(this.allySegments)) {
-            if (!segment.requests.resource) continue
+    private markRequest<T extends Request>(request: T, status: RequestStatus) {
+        this.requestStatus[request.id] = status
+    }
 
-            const requests = Object.entries(segment.requests.resource ?? {})
-            requests.sort(([_aID, aReq], [_bId, bReq]) => aReq.priority - bReq.priority)
-            return requests;
+    processRequests<T extends RequestType, R extends AllRequestTypes[T]>(
+        requestType: T,
+        cb: (playerName: string, request: R) => RequestStatus | undefined
+    ): void {
+        for (const [ally, segment] of Object.entries(this.allySegments)) {
+            for (const request of segment.requests?.[requestType] ?? []) {
+                const req = request as R
+
+                if (typeof req !== "string" && req.id in this.requestStatus)
+                    continue
+
+                const result = cb(ally, req)
+
+                if (result === undefined) return
+
+                // Mark request as fulfilled
+                if (typeof req !== 'string') {
+                    this.markRequest(req, result)
+                }
+            }
         }
-        return []
     }
 }
-
-// export const simpleAllies = new SimpleAllies()
