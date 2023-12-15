@@ -7,6 +7,8 @@
     "example": "examples"
   },
   "scripts": {
+    "build": "tsc -p .",
+    "format": "prettier -w .",
     "lint": "eslint src",
     "lint-fix": "eslint src --fix",
     "release": "semantic-release",
@@ -29,10 +31,12 @@
     "@semantic-release/commit-analyzer": "^9.0.2",
     "@semantic-release/git": "^10.0.1",
     "@semantic-release/release-notes-generator": "^11.0.1",
+    "@typescript-eslint/eslint-plugin": "^6.14.0",
+    "@typescript-eslint/parser": "^6.14.0",
     "eslint": "^7.23.0",
-    "eslint-config-prettier": "^7.2.0",
+    "eslint-config-prettier": "^9.1.0",
     "eslint-plugin-import": "^2.22.1",
-    "eslint-plugin-prettier": "^3.3.1",
+    "eslint-plugin-jsdoc": "^46.9.1",
     "eslint-plugin-screeps": "^2.1.0",
     "prettier": "^2.3.2",
     "screeps-viz": "^2.1.3",

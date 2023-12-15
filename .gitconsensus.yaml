@@ -1,4 +1,3 @@
-
 # Which version of the consensus rules to use
 version: 3
 
@@ -9,7 +8,6 @@ extra_labels: false
 prevent_doubles: true
 
 pull_requests:
-
   # At least three people should sign off on any pull request.
   quorum: 3
 

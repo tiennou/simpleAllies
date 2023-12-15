@@ -1,4 +1,4 @@
-import { AllyRequests } from "../src/ts/simpleAllies"
+import { AllyRequests } from '../src/ts/simpleAllies'
 
 // Here's what the segmentData property of simpleAllies might look like when it has a request
 
@@ -11,11 +11,11 @@ const exampleSegmentData: ExampleSegmentData = {
         resource: {
             '1': {
                 priority: 1,
-                roomName: "W1N1",
+                roomName: 'W1N1',
                 resourceType: RESOURCE_ENERGY,
                 amount: 1,
                 terminal: true,
-            }
-        }
-    }
+            },
+        },
+    },
 }
