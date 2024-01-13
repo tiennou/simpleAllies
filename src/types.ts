@@ -10,6 +10,10 @@ export interface SimpleAlliesSegment {
      * Requests from the ally
      */
     requests: AllyRequests;
+    /**
+     * Responses from the ally
+     */
+    responses: Partial<AllyResponses>;
     /** The tick the segment was last updated at */
     updatedAt: number;
 }
@@ -40,6 +44,16 @@ export interface AllRequestTypes {
     room: string;
 }
 
+export interface AllyResponses {
+    resource: { [id: RequestID]: ResourceResponse };
+    defense: { [id: RequestID]: DefenseResponse };
+    attack: { [id: RequestID]: AttackResponse };
+    work: { [id: RequestID]: WorkResponse };
+    funnel: { [id: RequestID]: FunnelResponse };
+    player: { [playerName: string]: PlayerIntelResponse };
+    room: { [roomName: string]: RoomIntelResponse };
+}
+
 /** A request identifier */
 export type RequestID = string & Tag.OpaqueTag<Request>;
 
@@ -57,6 +71,17 @@ export interface Request {
     timeout?: number;
 }
 
+export enum RequestStatus {
+    FULFILLED = 'f',
+    DISMISSED = 'd',
+}
+
+/** Abstract superclass for a response */
+export interface Response {
+    status: RequestStatus;
+    id: RequestID;
+}
+
 interface RoomRequest extends Request {
     /**
      * The name of the room the request applies to
@@ -64,15 +89,17 @@ interface RoomRequest extends Request {
     roomName: string;
 }
 
+export type Eta = number | [min: number, max: number];
+
+interface RoomResponse extends Response {
+    creepCount: number;
+    eta?: Eta;
+}
+
 /**
  * Request resource
  */
-export interface ResourceRequest extends Request {
-    /**
-     * The name of the room where the resource is needed.
-     */
-    roomName: string;
-
+export interface ResourceRequest extends RoomRequest {
     /**
      * The type of resource needed.
      */
@@ -89,21 +116,27 @@ export interface ResourceRequest extends Request {
     terminal?: boolean;
 }
 
+export interface ResourceResponse extends Response {}
+
 /**
  * Request help in defending a room
  */
 
 export interface DefenseRequest extends RoomRequest {}
 
+export interface DefenseResponse extends RoomResponse {}
+
 /**
  * Request an attack on a specific room
  */
 export interface AttackRequest extends RoomRequest {}
 
+export interface AttackResponse extends RoomResponse {}
+
 /**
  * Influence allies aggresion score towards a player
  */
-export interface PlayerIntel {
+export interface PlayerIntelResponse extends Response {
     /**
      * The name of the player.
      */
@@ -139,6 +172,8 @@ export interface WorkRequest extends RoomRequest {
     workType: WorkType;
 }
 
+export interface WorkResponse extends RoomResponse {}
+
 /**
  * Represents the goal type for a funnel request.
  */
@@ -162,10 +197,12 @@ export interface FunnelRequest extends RoomRequest {
     goalType: FunnelGoal;
 }
 
+export interface FunnelResponse extends RoomResponse {}
+
 /**
  * Share scouting data about hostile owned rooms
  */
-export interface RoomIntel {
+export interface RoomIntelResponse extends Response {
     /**
      * The player who owns this room. If there is no owner, the room probably isn't worth making a request about.
      */

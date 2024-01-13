@@ -1,6 +1,8 @@
 import * as Types from './types';
 import { insertSorted, randomHex } from 'utils';
 
+export const RequestStatus = Types.RequestStatus;
+
 /**
  * The segment ID used for communication
  */
@@ -52,6 +54,9 @@ export class SimpleAllies {
         funnel: Types.FunnelRequest[];
         room: Set<string>;
     };
+    responses: Types.AllyResponses;
+
+    requestStatus: { [id: Types.RequestID]: Types.RequestStatus } = {};
 
     selfInfo: Types.SelfInfo | undefined;
     public allySegments: { [playerName: string]: Types.SimpleAlliesSegment };
@@ -75,6 +80,15 @@ export class SimpleAllies {
             player: new Set(),
             funnel: [],
             room: new Set(),
+        };
+        this.responses = {
+            resource: {},
+            defense: {},
+            attack: {},
+            work: {},
+            funnel: {},
+            player: {},
+            room: {},
         };
         this.lastUpdateTime = 0;
     }
@@ -189,6 +203,8 @@ export class SimpleAllies {
                 typeof parsed === 'object' &&
                 'requests' in parsed &&
                 Array.isArray(parsed.requests) &&
+                'responses' in parsed &&
+                Array.isArray(parsed.responses) &&
                 'updatedAt' in parsed &&
                 typeof parsed.updatedAt === 'number'
             ) {
@@ -240,18 +256,68 @@ export class SimpleAllies {
     }
 
     /**
+     * Helper function used to purge responses to requests that have disappeared
+     */
+    private purgeResponses<T extends object>(obj: T, set: Set<string>) {
+        for (const id in obj) {
+            if (set.has(id)) {
+                delete obj[id];
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
      * Update our segment with requests made
      *
      * Must be called after all requests were made
      */
     public endRun() {
         // Check if we have any new requests to send
-        if (this.lastUpdateTime !== Game.time) return;
+        const doUpdate = this.lastUpdateTime === Game.time;
+        const doRefresh = Game.time % (this.refreshRate * this._allies.size) === 0;
+        if (!doUpdate && !doRefresh) return;
 
         // Make sure we don't have too many segments open
         if (this.canOpenSegment()) {
             this.log(`Too many segments open: can't update!`);
             return;
+        }
+
+        if (doRefresh) {
+            // Get all the requests indentifier across loaded segments
+            // We'll use that to purge out responses to requests that
+            // have been removed.
+            const playerNames = new Set<string>();
+            const roomNames = new Set<string>();
+            const allIds = new Set<Types.RequestID>();
+            for (const [_allyName, segment] of Object.entries(this.allySegments)) {
+                [
+                    ...(segment.requests?.attack ?? []),
+                    ...(segment.requests?.defense ?? []),
+                    ...(segment.requests?.work ?? []),
+                    ...(segment.requests?.funnel ?? []),
+                    ...(segment.requests?.resource ?? []),
+                ].forEach((req) => allIds.add(req.id));
+
+                segment.requests?.player?.forEach((name) => playerNames.add(name));
+                segment.requests?.room?.forEach((room) => roomNames.add(room));
+            }
+
+            let didUpdate = false;
+
+            didUpdate ??= this.purgeResponses(this.responses.resource, allIds);
+            didUpdate ??= this.purgeResponses(this.responses.attack, allIds);
+            didUpdate ??= this.purgeResponses(this.responses.defense, allIds);
+            didUpdate ??= this.purgeResponses(this.responses.work, allIds);
+            didUpdate ??= this.purgeResponses(this.responses.funnel, allIds);
+            didUpdate ??= this.purgeResponses(this.responses.player, playerNames);
+            didUpdate ??= this.purgeResponses(this.responses.room, roomNames);
+
+            if (didUpdate) {
+                this.lastUpdateTime = Game.time;
+            }
         }
 
         const segment: Types.SimpleAlliesSegment = {
@@ -265,8 +331,12 @@ export class SimpleAllies {
                 funnel: this.requests.funnel,
                 room: [...this.requests.room.keys()],
             },
+            responses: {},
         };
         if (this.selfInfo) segment.selfInfo = this.selfInfo;
+        if (this.responses) {
+            segment.responses = this.responses;
+        }
 
         this.writeSegment(SIMPLE_ALLIES_SEGMENT_ID, segment);
         this.markPublic(SIMPLE_ALLIES_SEGMENT_ID);
@@ -450,21 +520,96 @@ export class SimpleAllies {
         this.lastUpdateTime = Game.time;
     }
 
+    // Response handling
+
+    public replyResource(request: Types.ResourceRequest, amount: number) {
+        const response: Types.ResourceResponse = {
+            id: request.id,
+            status: amount > 0 ? Types.RequestStatus.FULFILLED : Types.RequestStatus.DISMISSED,
+        };
+        this.responses.resource[request.id] = response;
+        this.lastUpdateTime = Game.time;
+    }
+
+    public replyAttack(
+        request: Types.AttackRequest,
+        data: { creepCount: number; eta?: Types.Eta }
+    ) {
+        const response: Types.AttackResponse = {
+            id: request.id,
+            status:
+                data.creepCount > 0 ? Types.RequestStatus.FULFILLED : Types.RequestStatus.DISMISSED,
+            creepCount: data.creepCount,
+        };
+        if (data.creepCount && data.eta) response.eta = data.eta;
+
+        this.responses.attack[request.id] = response;
+        this.lastUpdateTime = Game.time;
+    }
+
+    public replyDefense(
+        request: Types.DefenseRequest,
+        data: { creepCount: number; eta?: Types.Eta }
+    ) {
+        const response: Types.DefenseResponse = {
+            id: request.id,
+            status:
+                data.creepCount > 0 ? Types.RequestStatus.FULFILLED : Types.RequestStatus.DISMISSED,
+            creepCount: data.creepCount,
+        };
+        if (data.creepCount && data.eta) response.eta = data.eta;
+
+        this.responses.defense[request.id] = response;
+        this.lastUpdateTime = Game.time;
+    }
+
+    public replyWork(request: Types.WorkRequest, data: { creepCount: number; eta?: Types.Eta }) {
+        const response: Types.WorkResponse = {
+            id: request.id,
+            status:
+                data.creepCount > 0 ? Types.RequestStatus.FULFILLED : Types.RequestStatus.DISMISSED,
+            creepCount: data.creepCount,
+        };
+        if (data.creepCount && data.eta) response.eta = data.eta;
+
+        this.responses.work[request.id] = response;
+        this.lastUpdateTime = Game.time;
+    }
+
+    public replyIntel(roomName: string, intel: Types.RoomIntelResponse) {
+        this.responses.room[roomName] = intel;
+        this.lastUpdateTime = Game.time;
+    }
+
+    public replyPlayer(playerName: string, info: Types.PlayerIntelResponse) {
+        this.responses.player[playerName] = info;
+        this.lastUpdateTime = Game.time;
+    }
+
     // Request processing
+
+    private markRequest<T extends Types.Request>(request: T, status: Types.RequestStatus) {
+        this.requestStatus[request.id] = status;
+    }
 
     public processRequests<T extends Types.RequestType, R extends Types.AllRequestTypes[T]>(
         requestType: T,
-        cb: (playerName: string, request: R) => void
+        cb: (playerName: string, request: R) => Types.RequestStatus | undefined
     ): void {
         for (const [ally, segment] of Object.entries(this.allySegments)) {
             for (const request of segment.requests?.[requestType] ?? []) {
                 const req = request as R;
 
-                if (typeof req !== 'string') continue;
+                if (typeof req !== 'string' && req.id in this.requestStatus) continue;
 
                 const result = cb(ally, req);
 
                 if (result === undefined) return;
+
+                // Mark request as fulfilled
+                if (typeof req !== 'string') {
+                    this.markRequest(req, result);
+                }
             }
         }
     }

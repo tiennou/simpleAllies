@@ -1,4 +1,4 @@
-import { SimpleAllies } from './simpleAllies';
+import { SimpleAllies, RequestStatus } from './simpleAllies';
 
 const simpleAllies = new SimpleAllies();
 
@@ -32,6 +32,7 @@ function respondToAllyDefenseRequests() {
             playerName,
             JSON.stringify(request)
         );
+        return RequestStatus.DISMISSED;
     });
 }
 
@@ -46,6 +47,7 @@ function respondToAllyResourceRequests() {
             playerName,
             JSON.stringify(request)
         );
+        return RequestStatus.FULFILLED;
     });
 }
 
