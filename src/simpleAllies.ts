@@ -1,4 +1,5 @@
 import * as Types from './types';
+import { insertSorted, randomHex } from 'utils';
 
 /**
  * The segment ID used for communication
@@ -10,6 +11,11 @@ export const SIMPLE_ALLIES_SEGMENT_ID = 90;
  * This isn't in the docs for some reason, so we need to add it
  */
 const MAX_OPEN_SEGMENTS = 10;
+
+/**
+ * Default priority if left unspecified
+ */
+const SIMPLE_ALLIES_DEFAULT_PRIORITY = 0;
 
 /**
  * The rate at which to refresh allied segments
@@ -37,22 +43,21 @@ export const EWorkType = {
  * Simple allies class manages ally requests
  */
 export class SimpleAllies {
-    /**
-     * State
-     */
-    private myRequests: Types.AllyRequests = {
-        resource: [],
-        defense: [],
-        attack: [],
-        player: [],
-        work: [],
-        funnel: [],
-        room: [],
+    private requests: {
+        resource: Types.ResourceRequest[];
+        defense: Types.DefenseRequest[];
+        attack: Types.AttackRequest[];
+        player: Set<string>;
+        work: Types.WorkRequest[];
+        funnel: Types.FunnelRequest[];
+        room: Set<string>;
     };
-    private myEconInfo?: Types.EconInfo;
+
+    selfInfo: Types.SelfInfo | undefined;
     public allySegments: { [playerName: string]: Types.SimpleAlliesSegment };
     private allyIdx: number;
     private _allies: Set<string>;
+    private lastUpdateTime: number;
     private refreshRate: number;
     private _debug: boolean;
 
@@ -62,6 +67,16 @@ export class SimpleAllies {
         this._allies = new Set();
         this.allyIdx = 0;
         this.allySegments = {};
+        this.requests = {
+            resource: [],
+            defense: [],
+            attack: [],
+            work: [],
+            player: new Set(),
+            funnel: [],
+            room: new Set(),
+        };
+        this.lastUpdateTime = 0;
     }
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -74,6 +89,15 @@ export class SimpleAllies {
         if (!this._debug) return;
 
         this.log(...args);
+    }
+
+    private makeRequestID() {
+        return randomHex(20) as Types.RequestID;
+    }
+
+    private checkPriority(priority: number | undefined) {
+        if (typeof priority !== 'number') return SIMPLE_ALLIES_DEFAULT_PRIORITY;
+        return Math.max(0, Math.min(1, priority));
     }
 
     addAlly(...allies: string[]) {
@@ -92,24 +116,14 @@ export class SimpleAllies {
     }
 
     /**
-     * To call before any requests are made or responded to.
+     * Main initialization method
+     *
+     * Must be called before any requests are made or responded to.
+     *
+     * Is responsible for fetching allied segments in the background
      */
     public initRun() {
-        // Reset requests
-        this.myRequests = {
-            resource: [],
-            defense: [],
-            attack: [],
-            player: [],
-            work: [],
-            funnel: [],
-            room: [],
-        };
-
-        // Reset econ info
-        this.myEconInfo = undefined;
-
-        // Read ally segment data
+        // Reset the data of myRequests
         this.readAllySegment();
     }
 
@@ -175,8 +189,8 @@ export class SimpleAllies {
                 typeof parsed === 'object' &&
                 'requests' in parsed &&
                 Array.isArray(parsed.requests) &&
-                'updated' in parsed &&
-                typeof parsed.updated === 'number'
+                'updatedAt' in parsed &&
+                typeof parsed.updatedAt === 'number'
             ) {
                 segment = parsed as Types.SimpleAlliesSegment;
             }
@@ -226,121 +240,232 @@ export class SimpleAllies {
     }
 
     /**
-     * To call after requests have been made, to assign requests to the next ally
+     * Update our segment with requests made
+     *
+     * Must be called after all requests were made
      */
     public endRun() {
+        // Check if we have any new requests to send
+        if (this.lastUpdateTime !== Game.time) return;
+
+        // Make sure we don't have too many segments open
         if (this.canOpenSegment()) {
-            this.log('Too many segments open');
+            this.log(`Too many segments open: can't update!`);
             return;
         }
 
         const segment: Types.SimpleAlliesSegment = {
-            requests: this.myRequests,
-            econ: this.myEconInfo,
-            updated: Game.time,
+            updatedAt: Game.time,
+            requests: {
+                resource: this.requests.resource,
+                defense: this.requests.defense,
+                attack: this.requests.attack,
+                player: [...this.requests.player.keys()],
+                work: this.requests.work,
+                funnel: this.requests.funnel,
+                room: [...this.requests.room.keys()],
+            },
         };
+        if (this.selfInfo) segment.selfInfo = this.selfInfo;
+
         this.writeSegment(SIMPLE_ALLIES_SEGMENT_ID, segment);
         this.markPublic(SIMPLE_ALLIES_SEGMENT_ID);
     }
 
+    // Request methods
+
     /**
      * Request resource
-     * @param args - a request object
-     * @param {number} args.priority - 0-1 where 1 is highest consideration
-     * @param {string} args.roomName
-     * @param {'energy' | ResourceConstant} args.resourceType
-     * @param {number} args.amount - How much they want of the resource. If the responder sends only a portion of what you ask for, that's fine
-     * @param {boolean} [args.terminal] - If the bot has no terminal, allies should instead haul the resources to us
-     * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
+     * @param {'energy' | ResourceConstant} resourceType - The resource to ask for
+     * @param {number} amount - How much they want of the resource. If the responder sends only a portion of what you ask for, that's fine
+     * @param {string} roomName - The room to transfer resources to
+     * @param [opts] - options for the request
+     * @param {number} [opts.priority] - 0-1 where 1 is highest consideration
+     * @param {boolean} [opts.terminal] - If the bot has no terminal, allies should instead haul the resources to us
+     * @param {number} [opts.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
      */
-    public requestResource(args: Types.ResourceRequest) {
-        this.myRequests.resource.push(args);
+    public requestResource(
+        resourceType: ResourceConstant,
+        amount: number,
+        roomName: string,
+        opts?: { priority: number; hasTerminal?: boolean; timeout?: number }
+    ) {
+        const id = this.makeRequestID();
+        const request: Types.ResourceRequest = {
+            id,
+            resourceType,
+            amount,
+            roomName: roomName,
+            priority: this.checkPriority(opts?.priority),
+        };
+        if (opts?.hasTerminal) request.terminal = opts.hasTerminal;
+        if (opts?.timeout) request.timeout = opts.timeout;
+
+        insertSorted(this.requests.resource, request, (a, b) => a.priority < b.priority);
+        this.lastUpdateTime = Game.time;
+        return id;
     }
 
     /**
      * Request help in defending a room
-     * @param args - a request object
-     * @param {number} args.priority - 0-1 where 1 is highest consideration
-     * @param {string} args.roomName
-     * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
+     * @param {string} roomName - The room that needs defending
+     * @param [opts] - a request object
+     * @param {number} [opts.priority] - 0-1 where 1 is highest consideration
+     * @param {number} [opts.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
      */
-    public requestDefense(args: Types.DefenseRequest) {
-        this.myRequests.defense.push(args);
+    public requestDefense(roomName: string, opts?: { priority?: number; timeout?: number }) {
+        if (this.requests.defense.some((req) => req.roomName === roomName)) {
+            this.log(`defense request for room ${roomName} already exists, ignoring`);
+            return;
+        }
+        const id = this.makeRequestID();
+        const request: Types.DefenseRequest = {
+            id,
+            roomName,
+            priority: this.checkPriority(opts?.priority),
+        };
+        if (opts?.timeout) request.timeout = opts.timeout;
+        insertSorted(this.requests.defense, request, (a, b) => a.priority < b.priority);
+        this.lastUpdateTime = Game.time;
+        return id;
     }
 
     /**
-     * Request an attack on a specific room
-     * @param args - a request object
-     * @param {number} args.priority - 0-1 where 1 is highest consideration
-     * @param {string} args.roomName
-     * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
+     * Request an attack force to be sent to the given room
+     * @param {string} roomName - The room to send an attack force to
+     * @param [opts] - a request object
+     * @param {number} [opts.priority] - 0-1 where 1 is highest consideration
+     * @param {number} [opts.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
      */
-    public requestAttack(args: Types.AttackRequest) {
-        this.myRequests.attack.push(args);
-    }
-
-    /**
-     * Influence allies aggresion score towards a player
-     * @param args - a request object
-     * @param {string} args.playerName - name of the hostile player
-     * @param {number} [args.hate] - 0-1 where 1 is highest consideration. How much you think your team should hate the player. Should probably affect combat aggression and targetting
-     * @param {number} [args.lastAttackedBy] - The last time this player has attacked you
-     * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
-     */
-    public requestPlayer(args: Types.PlayerRequest) {
-        this.myRequests.player.push(args);
+    public requestAttack(roomName: string, opts?: { priority?: number; timeout?: number }) {
+        if (this.requests.attack.some((req) => req.roomName === roomName)) {
+            this.log(`attack request for room ${roomName} already exists, ignoring`);
+            return;
+        }
+        const id = this.makeRequestID();
+        const request: Types.AttackRequest = {
+            id,
+            roomName,
+            priority: this.checkPriority(opts?.priority),
+        };
+        if (opts?.timeout) request.timeout = opts.timeout;
+        insertSorted(this.requests.attack, request, (a, b) => a.priority < b.priority);
+        this.lastUpdateTime = Game.time;
+        return id;
     }
 
     /**
      * Request help in building/fortifying a room
-     * @param args - a request object
-     * @param {string} args.roomName
-     * @param {number} args.priority - 0-1 where 1 is highest consideration
-     * @param {EWorkType.BUILD | EWorkType.REPAIR} args.workType
+     * @param {string} roomName - The room to send help to
+     * @param {EWorkType.BUILD | EWorkType.REPAIR} workType - The type of work to perform there
+     * @param [opts] - a request object
+     * @param {number} [opts.priority] - 0-1 where 1 is highest consideration
      * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
      */
-    public requestWork(args: Types.WorkRequest) {
-        this.myRequests.work.push(args);
+    public requestWork(
+        roomName: string,
+        workType: Types.WorkType,
+        opts?: { priority?: number; timeout?: number }
+    ) {
+        if (this.requests.work.some((req) => req.roomName === roomName)) {
+            this.log(`work request for room ${roomName} already exists, ignoring`);
+            return;
+        }
+        const id = this.makeRequestID();
+        const request: Types.WorkRequest = {
+            id,
+            roomName,
+            workType,
+            priority: this.checkPriority(opts?.priority),
+        };
+        if (opts?.timeout) request.timeout = opts.timeout;
+        insertSorted(this.requests.work, request, (a, b) => a.priority < b.priority);
+        this.lastUpdateTime = Game.time;
+        return id;
     }
 
     /**
      * Request energy to a room for a purpose of making upgrading faster.
-     * @param args - a request object
-     * @param {number} args.maxAmount - Amount of energy needed. Should be equal to energy that needs to be put into controller for achieving goal.
-     * @param {EFunnelGoal.GCL | EFunnelGoal.RCL7 | EFunnelGoal.RCL8} args.goalType - What energy will be spent on. Room receiving energy should focus solely on achieving the goal.
-     * @param {string} [args.roomName] - Room to which energy should be sent. If undefined resources can be sent to any of requesting player's rooms.
-     * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
+     * @param roomName - The room name to send the energy to
+     * @param {EFunnelGoal.GCL | EFunnelGoal.RCL7 | EFunnelGoal.RCL8} goalType - What energy will be spent on. Room receiving energy should focus solely on achieving the goal.
+     * @param {number} maxAmount - Amount of energy needed. Should be equal to energy that needs to be put into controller for achieving goal.
+     * @param [opts] - a request object
+     * @param {number} [opts.priority] - 0-1 where 1 is highest consideration
+     * @param {number} [opts.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
      */
-    public requestFunnel(args: Types.FunnelRequest) {
-        this.myRequests.funnel.push(args);
+    public requestFunnel(
+        roomName: string,
+        goalType: Types.FunnelGoal,
+        maxAmount: number,
+        opts?: { priority?: number; timeout?: number }
+    ) {
+        if (this.requests.funnel.some((req) => req.roomName === roomName)) {
+            this.log(`funnel request for room ${roomName} already exists, ignoring`);
+            return;
+        }
+        const id = this.makeRequestID();
+        const request: Types.FunnelRequest = {
+            id,
+            roomName,
+            goalType,
+            maxAmount,
+            priority: this.checkPriority(opts?.priority),
+        };
+        if (opts?.timeout) request.timeout = opts.timeout;
+        insertSorted(this.requests.funnel, request, (a, b) => a.priority < b.priority);
+        this.lastUpdateTime = Game.time;
+        return id;
     }
 
     /**
-     * Share scouting data about hostile owned rooms
-     * @param args - a request object
-     * @param {string} args.roomName
-     * @param {string} args.playerName - The player who owns this room. If there is no owner, the room probably isn't worth making a request about
-     * @param {number} args.lastScout - The last tick your scouted this room to acquire the data you are now sharing
-     * @param {number} args.rcl
-     * @param {number} args.energy - The amount of stored energy the room has. storage + terminal + factory should be sufficient
-     * @param {number} args.towers
-     * @param {number} args.avgRamprtHits
-     * @param {boolean} args.terminal - does scouted room have terminal built
-     * @param {number} [args.timeout] - Tick after which the request should be ignored. If your bot crashes, or stops updating requests for some other reason, this is a safety mechanism.
+     * Request intel on a player
+     *
+     * @param playerName - The player name to ask intel about
      */
-    public requestRoom(args: Types.RoomRequest) {
-        this.myRequests.room.push(args);
+    requestPlayerIntel(playerName: string) {
+        this.requests.player.add(playerName);
+        this.lastUpdateTime = Game.time;
+    }
+
+    /**
+     * Request intel on a given room
+     *
+     * @param roomName - The room name to ask intel about
+     */
+    public requestRoomIntel(roomName: string) {
+        this.requests.room.add(roomName);
+        this.lastUpdateTime = Game.time;
     }
 
     /**
      * Share how your bot is doing economically
-     * @param args - a request object
-     * @param {number} args.credits - total credits the bot has. Should be 0 if there is no market on the server
-     * @param {number} args.sharableEnergy - the maximum amount of energy the bot is willing to share with allies. Should never be more than the amount of energy the bot has in storing structures
-     * @param {number} [args.energyIncome] - The average energy income the bot has calculated over the last 100 ticks. Optional, as some bots might not be able to calculate this easily.
-     * @param {Object.<MineralConstant, number>} [args.mineralNodes] - The number of mineral nodes the bot has access to, probably used to inform expansion
+     * @param info - Info about your own bot
+     * @param {number} info.credits - total credits the bot has. Should be 0 if there is no market on the server
+     * @param {number} info.sharableEnergy - the maximum amount of energy the bot is willing to share with allies. Should never be more than the amount of energy the bot has in storing structures
+     * @param {number} [info.energyIncome] - The average energy income the bot has calculated over the last 100 ticks. Optional, as some bots might not be able to calculate this easily.
+     * @param {Object.<MineralConstant, number>} [info.mineralNodes] - The number of mineral nodes the bot has access to, probably used to inform expansion
      */
-    public setEconInfo(args: Types.EconInfo) {
-        this.myEconInfo = args;
+    public setSelf(info: Types.SelfInfo) {
+        this.selfInfo = info;
+        this.lastUpdateTime = Game.time;
+    }
+
+    // Request processing
+
+    public processRequests<T extends Types.RequestType, R extends Types.AllRequestTypes[T]>(
+        requestType: T,
+        cb: (playerName: string, request: R) => void
+    ): void {
+        for (const [ally, segment] of Object.entries(this.allySegments)) {
+            for (const request of segment.requests?.[requestType] ?? []) {
+                const req = request as R;
+
+                if (typeof req !== 'string') continue;
+
+                const result = cb(ally, req);
+
+                if (result === undefined) return;
+            }
+        }
     }
 }

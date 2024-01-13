@@ -2,9 +2,16 @@
  * Represents the segment data for simpleAllies.
  */
 export interface SimpleAlliesSegment {
-    econ?: EconInfo;
+    /**
+     * Economic data on ourself
+     */
+    selfInfo?: SelfInfo;
+    /**
+     * Requests from the ally
+     */
     requests: AllyRequests;
-    updated: number;
+    /** The tick the segment was last updated at */
+    updatedAt: number;
 }
 
 /**
@@ -14,10 +21,122 @@ export interface AllyRequests {
     resource: ResourceRequest[];
     defense: DefenseRequest[];
     attack: AttackRequest[];
-    player: PlayerRequest[];
     work: WorkRequest[];
     funnel: FunnelRequest[];
-    room: RoomRequest[];
+    player: string[];
+    room: string[];
+}
+
+/** Type of requests supported */
+export type RequestType = keyof AllyRequests;
+
+export interface AllRequestTypes {
+    resource: ResourceRequest;
+    defense: DefenseRequest;
+    attack: AttackRequest;
+    work: WorkRequest;
+    funnel: FunnelRequest;
+    player: string;
+    room: string;
+}
+
+/** A request identifier */
+export type RequestID = string & Tag.OpaqueTag<Request>;
+
+/**
+ * Abstract superclass of a request
+ */
+export interface Request {
+    /** The request's unique identifier */
+    id: RequestID;
+    /** The request's priority, from 0 (low) to 1 (high) */
+    priority: number;
+    /**
+     * Tick after which the request should be ignored.
+     */
+    timeout?: number;
+}
+
+interface RoomRequest extends Request {
+    /**
+     * The name of the room the request applies to
+     */
+    roomName: string;
+}
+
+/**
+ * Request resource
+ */
+export interface ResourceRequest extends Request {
+    /**
+     * The name of the room where the resource is needed.
+     */
+    roomName: string;
+
+    /**
+     * The type of resource needed.
+     */
+    resourceType: ResourceConstant;
+
+    /**
+     * The amount of the resource needed.
+     */
+    amount: number;
+
+    /**
+     * If set to false, allies can haul resources to us.
+     */
+    terminal?: boolean;
+}
+
+/**
+ * Request help in defending a room
+ */
+
+export interface DefenseRequest extends RoomRequest {}
+
+/**
+ * Request an attack on a specific room
+ */
+export interface AttackRequest extends RoomRequest {}
+
+/**
+ * Influence allies aggresion score towards a player
+ */
+export interface PlayerIntel {
+    /**
+     * The name of the player.
+     */
+    playerName: string;
+
+    /**
+     * The level of hatred towards the player, ranging from 0 to 1 where 1 is the highest consideration.
+     * This value affects combat aggression and targeting.
+     */
+    hate?: number;
+
+    /**
+     * The last time this player has attacked you.
+     */
+    lastAttackedBy?: number;
+}
+
+/**
+ * Represents the type of work needed in a work request.
+ */
+export const enum WorkType {
+    BUILD = 'build',
+    REPAIR = 'repair',
+}
+
+/**
+ * Request help in building/fortifying a room
+ */
+export interface WorkRequest extends RoomRequest {
+    /**
+     * The type of work needed.
+     */
+    workType: WorkType;
 }
 
 /**
@@ -30,128 +149,9 @@ export const enum FunnelGoal {
 }
 
 /**
- * Represents the type of work needed in a work request.
- */
-export const enum WorkType {
-    BUILD = 'build',
-    REPAIR = 'repair',
-}
-
-/**
- * Request resource
- */
-export interface ResourceRequest {
-    /**
-     * The name of the room where the resource is needed.
-     */
-    roomName: string;
-    /**
-     * The type of resource needed.
-     */
-    resourceType: ResourceConstant;
-    /**
-     * The amount of the resource needed.
-     */
-    amount: number;
-    /**
-     * The priority of the resource request, ranging from 0 to 1 where 1 is the highest consideration.
-     */
-    priority: number;
-    /**
-     * If set to false, allies can haul resources to us.
-     */
-    terminal?: boolean;
-    /**
-     * Tick after which the request should be ignored.
-     */
-    timeout?: number;
-}
-
-/**
- * Request help in defending a room
- */
-export interface DefenseRequest {
-    /**
-     * The name of the room where the defense is needed.
-     */
-    roomName: string;
-    /**
-     * The priority of the defense request, ranging from 0 to 1 where 1 is the highest consideration.
-     */
-    priority: number;
-    /**
-     * Tick after which the request should be ignored.
-     */
-    timeout?: number;
-}
-
-/**
- * Request an attack on a specific room
- */
-export interface AttackRequest {
-    /**
-     * The name of the room where the attack is needed.
-     */
-    roomName: string;
-    /**
-     * The priority of the attack request, ranging from 0 to 1 where 1 is the highest consideration.
-     */
-    priority: number;
-    /**
-     * Tick after which the request should be ignored.
-     */
-    timeout?: number;
-}
-
-/**
- * Influence allies aggresion score towards a player
- */
-export interface PlayerRequest {
-    /**
-     * The name of the player.
-     */
-    playerName: string;
-    /**
-     * The level of hatred towards the player, ranging from 0 to 1 where 1 is the highest consideration.
-     * This value affects combat aggression and targeting.
-     */
-    hate?: number;
-    /**
-     * The last time this player has attacked you.
-     */
-    lastAttackedBy?: number;
-    /**
-     * Tick after which the request should be ignored.
-     */
-    timeout?: number;
-}
-
-/**
- * Request help in building/fortifying a room
- */
-export interface WorkRequest {
-    /**
-     * The name of the room where the work is needed.
-     */
-    roomName: string;
-    /**
-     * The priority of the work request, ranging from 0 to 1 where 1 is the highest consideration.
-     */
-    priority: number;
-    /**
-     * The type of work needed.
-     */
-    workType: WorkType;
-    /**
-     * Tick after which the request should be ignored.
-     */
-    timeout?: number;
-}
-
-/**
  * Request energy to a room for a purpose of making upgrading faster.
  */
-export interface FunnelRequest {
+export interface FunnelRequest extends RoomRequest {
     /**
      * The amount of energy needed. Should be equal to the energy that needs to be put into the controller for achieving the goal.
      */
@@ -160,24 +160,12 @@ export interface FunnelRequest {
      * The type of goal that the energy will be spent on. The room receiving energy should focus solely on achieving this goal.
      */
     goalType: FunnelGoal;
-    /**
-     * The name of the room to which the energy should be sent. If undefined, resources can be sent to any of the requesting player's rooms.
-     */
-    roomName: string;
-    /**
-     * Tick after which the request should be ignored.
-     */
-    timeout?: number;
 }
 
 /**
  * Share scouting data about hostile owned rooms
  */
-export interface RoomRequest {
-    /**
-     * The name of the room.
-     */
-    roomName: string;
+export interface RoomIntel {
     /**
      * The player who owns this room. If there is no owner, the room probably isn't worth making a request about.
      */
@@ -215,7 +203,7 @@ export interface RoomRequest {
 /**
  * Share how your bot is doing economically
  */
-export interface EconInfo {
+export interface SelfInfo {
     /**
      * The total credits the bot has. Should be 0 if there is no market on the server.
      */

@@ -25,30 +25,28 @@ export function loop() {
  * Example of responding to ally defense requests
  */
 function respondToAllyDefenseRequests() {
-    for (const playerName in simpleAllies.allySegments) {
-        const segment = simpleAllies.allySegments[playerName];
-
-        // Send creeps to defend rooms
-        for (const request of segment.requests.defense) {
-            console.log('[simpleAllies] Respond to defense request', JSON.stringify(request));
-            // ...
-        }
-    }
+    // Send creeps to defend rooms
+    simpleAllies.processRequests('defense', (playerName, request) => {
+        console.log(
+            '[simpleAllies] Respond to defense request from',
+            playerName,
+            JSON.stringify(request)
+        );
+    });
 }
 
 /**
  * Example of responding to ally resource requests
  */
 function respondToAllyResourceRequests() {
-    for (const playerName in simpleAllies.allySegments) {
-        const segment = simpleAllies.allySegments[playerName];
-
-        // Send resources to rooms
-        for (const request of segment.requests.resource) {
-            console.log('[simpleAllies] Respond to resource request', JSON.stringify(request));
-            // ...
-        }
-    }
+    // Send resources to rooms
+    simpleAllies.processRequests('resource', (playerName, request) => {
+        console.log(
+            '[simpleAllies] Respond to resource request',
+            playerName,
+            JSON.stringify(request)
+        );
+    });
 }
 
 /**
@@ -56,11 +54,8 @@ function respondToAllyResourceRequests() {
  */
 function requestAllyResources() {
     // Add resource request
-    simpleAllies.requestResource({
+    simpleAllies.requestResource(RESOURCE_ENERGY, 10000, 'W1N1', {
         priority: 1,
-        roomName: 'W1N1',
-        resourceType: RESOURCE_ENERGY,
-        amount: 1000,
     });
 }
 
@@ -69,8 +64,7 @@ function requestAllyResources() {
  */
 function requestAllyDefense() {
     // Add defense request
-    simpleAllies.requestDefense({
+    simpleAllies.requestDefense('W1N1', {
         priority: 1,
-        roomName: 'W1N1',
     });
 }
